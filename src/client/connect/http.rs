@@ -7,14 +7,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use http::uri::{Scheme, Uri};
-use futures_util::{TryFutureExt};
 use net2::TcpBuilder;
 use pin_project::{pin_project, project};
 use tokio::net::TcpStream;
 use tokio::time::Delay;
 
 use crate::common::{Future, Pin, Poll, task};
-use super::{Connected, Destination};
+use super::{Connected};
 use super::dns::{self, GaiResolver, Resolve};
 //#[cfg(feature = "runtime")] use super::dns::TokioThreadpoolGaiResolver;
 
@@ -244,7 +243,7 @@ impl<R: fmt::Debug> fmt::Debug for HttpConnector<R> {
     }
 }
 
-impl<R> tower_service::Service<Destination> for HttpConnector<R>
+impl<R> tower_service::Service<Uri> for HttpConnector<R>
 where
     R: Resolve + Clone + Send + Sync,
     R::Future: Send,
@@ -258,29 +257,29 @@ where
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, dst: Destination) -> Self::Future {
+    fn call(&mut self, dst: Uri) -> Self::Future {
         trace!(
-            "Http::connect; scheme={}, host={}, port={:?}",
+            "Http::connect; scheme={:?}, host={:?}, port={:?}",
             dst.scheme(),
             dst.host(),
             dst.port(),
         );
 
         if self.config.enforce_http {
-            if dst.uri.scheme() != Some(&Scheme::HTTP) {
+            if dst.scheme() != Some(&Scheme::HTTP) {
                 return self.invalid_url(INVALID_NOT_HTTP);
             }
-        } else if dst.uri.scheme().is_none() {
+        } else if dst.scheme().is_none() {
             return self.invalid_url(INVALID_MISSING_SCHEME);
         }
 
-        let host = match dst.uri.host() {
+        let host = match dst.host() {
             Some(s) => s,
             None => return self.invalid_url(INVALID_MISSING_HOST),
         };
-        let port = match dst.uri.port() {
+        let port = match dst.port() {
             Some(port) => port.as_u16(),
-            None => if dst.uri.scheme() == Some(&Scheme::HTTPS) { 443 } else { 80 },
+            None => if dst.scheme() == Some(&Scheme::HTTPS) { 443 } else { 80 },
         };
 
         HttpConnecting {
@@ -288,24 +287,6 @@ where
             state: State::Lazy(self.resolver.clone(), host.into()),
             port,
         }
-    }
-}
-
-impl<R> tower_service::Service<Uri> for HttpConnector<R>
-where
-    R: Resolve + Clone + Send + Sync + 'static,
-    R::Future: Send,
-{
-    type Response = TcpStream;
-    type Error = ConnectError;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
-
-    fn poll_ready(&mut self, cx: &mut task::Context<'_>) -> Poll<Result<(), Self::Error>> {
-        tower_service::Service::<Destination>::poll_ready(self, cx)
-    }
-
-    fn call(&mut self, uri: Uri) -> Self::Future {
-        Box::pin(self.call(Destination { uri }).map_ok(|(s, _)| s))
     }
 }
 
@@ -674,10 +655,12 @@ impl ConnectingTcp {
 mod tests {
     use std::io;
 
-    use super::{Connected, Destination, HttpConnector};
+    use ::http::Uri;
+
+    use super::{Connected, HttpConnector};
     use super::super::sealed::Connect;
 
-    async fn connect<C>(connector: C, dst: Destination) -> Result<(C::Transport, Connected), C::Error>
+    async fn connect<C>(connector: C, dst: Uri) -> Result<(C::Transport, Connected), C::Error>
     where
         C: Connect,
     {
@@ -686,10 +669,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_errors_enforce_http() {
-        let uri = "https://example.domain/foo/bar?baz".parse().unwrap();
-        let dst = Destination {
-            uri,
-        };
+        let dst = "https://example.domain/foo/bar?baz".parse().unwrap();
         let connector = HttpConnector::new();
 
         let err = connect(connector, dst).await.unwrap_err();
@@ -698,10 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_errors_missing_scheme() {
-        let uri = "example.domain".parse().unwrap();
-        let dst = Destination {
-            uri,
-        };
+        let dst = "example.domain".parse().unwrap();
         let mut connector = HttpConnector::new();
         connector.enforce_http(false);
 
